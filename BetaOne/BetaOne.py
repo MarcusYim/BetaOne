@@ -1,20 +1,17 @@
 import chess
 import random
 import numpy
+import time
 import chess.svg
 import chess.pgn
+from utils import sample
 import sys, os, random, time, warnings
 import multiprocessing
 from multiprocessing import Pool, Manager
 from scipy.stats import pearsonr
 
+
 class MCTS(object):
-
-    T = 0
-    visits = {}
-    differential = {}
-    c = 0
-
     def __init__(self, manager, T=0.3, C=1.5):
         super().__init__()
 
@@ -23,82 +20,131 @@ class MCTS(object):
         self.T = T
         self.C = C
 
-    def value(self, board, playouts = 100, steps = 5):
+    def copy_board(self, board):
+        fen = board.fen()
+        copy_fen = fen[0:len(fen) - 4] + " 0 0"
+        return chess.Board(copy_fen)
+
+    def value(self, board, playouts=50, steps=5):
+        give = [playouts]
+        visit_dict = [playouts]
+        diff_dict = [playouts]
+
+        for i in range(playouts):
+            visit_dict[i] = {}
+            diff_dict[i] = {}
+            give[i] = (self.copy_board(board), visit_dict[i], diff_dict[i])
+
         with Pool() as p:
-            copy_fen = board.fen()
-            copy_board = chess.Board()
-            scores = p.map(self.playout, )
-    
-    def heuristicValue(board: chess.Board):
-        #V + c * sqrt(ln(N) / Ni)
+            scores = p.starmap(self.rollout_value, give)
+
+        amalgam_visit = {}
+        amalgam_diff = {}
+
+        for i in range(playouts):
+            temp = {key: visit_dict[i].get(key, 0) + amalgam_visit.get(key, 0)
+                    for key in set(visit_dict[i]) | set(amalgam_visit)}
+
+            amalgam_visit = temp
+
+            temp = {key: diff_dict[i].get(key, 0) + amalgam_diff.get(key, 0)
+                    for key in set(diff_dict[i]) | set(amalgam_diff)}
+
+            amalgam_diff = temp
+
+        return self.differential[self.hash_board(board)] * 1.0 / self.visits[self.hash_board(board)]
+
+    def heuristic_value(self, board: chess.Board):
+        # V/Ni + c * sqrt(ln(N) / Ni)
         N = self.visits.get("total", 1)
-        Ni = self.visits.get(hash(board.fen()), 1e-9)
-        V = self.differential.get(hash(board.fen()), 0) * 1.0 / Ni
-        return V + self.C * (numpy.log(N)/Ni)
+        Ni = self.visits.get(self.hash_board(board), 1e-9)
+        V = self.differential.get(self.hash_board(board), 0) * 1.0 / Ni
+        return V + self.C * (numpy.log(N) / Ni)
 
-    def record(self, board: chess.Board, score: int):
+    def record(self, board: chess.Board, score: float):
         self.visits["total"] = self.visits.get("total", 0) + 1
-        self.visits[hash(board.fen())] = self.visits.get(hash(board.fen()), 0) + 1
-        self.differential[hash(board.fen())] = self.differential.get(hash(board.fen()), 0) + score
+        self.visits[self.hash_board(board)] = self.visits.get(self.hash_board(board), 0) + 1
+        self.differential[self.hash_board(board)] = self.differential.get(self.hash_board(board), 0) + score
 
-    def rolloutValue(self, board: chess.Board, expand = 150):
-        if (expand == 0):
-            return -0.5
+    def rollout_value(self, board: chess.Board, expand=100):
+        if expand == 0:
+            self.record(board, -0.5)
+            return 0.5
 
         if board.is_game_over():
-            result = board.result();
-            sub_res = result[0 : result.find("-")]
-            if (sub_res == "1"):
-                record(board, -1)
+            result = board.result()
+            sub_res = result[0: result.find("-")]
+            if sub_res == "1":
+                self.record(board, -1)
                 return 1
-            elif (sub_res == "0"):
-                record(board, 1)
+            elif sub_res == "0":
+                self.record(board, 1)
                 return -1
-            elif (sub_res == "1/2"):
-                record(board, -0.5)
+            elif sub_res == "1/2":
+                self.record(board, -0.5)
                 return 0.5
 
-        for move in board.legal_moves:
+        action_mapping = {}
 
+        for move in board.legal_moves:
             board.push(move)
-            action_mapping[move] = self.heuristicValue(game)
-            game.undo_move()
+            action_mapping[move] = self.heuristic_value(board)
+            board.pop()
 
         chosen_action = sample(action_mapping, T=self.T)
         board.push(chosen_action)
-        score = -1 * self.playout(board, expand =  expand - 1)
+        score = -1 * self.rollout_value(board, expand=expand - 1)
         board.pop()
         self.record(board, score)
 
         return score
 
+    def best_move(self, board, playouts=50):
+        startTime = time.time()
 
-def humanPlayer(board: chess.Board):
+        action_mapping = {}
+
+        for move in board.legal_moves:
+            board.push(move)
+            action_mapping[move] = self.value(board, playouts=playouts)
+            board.pop()
+
+        print("Process took: " + str(time.time() - startTime) + " seconds")
+        print(str((time.time() - startTime) / 60.0) + " minutes")
+
+        return max(action_mapping, key=action_mapping.get)
+
+    def hash_board(self, board):
+        fen_string = board.fen()
+        return fen_string[0:len(fen_string) - 13]
+
+
+def human_player(board: chess.Board):
+    print("enter you move: ")
+    inp = input("")
+
+    while True:
+        if board.is_legal(board.parse_san(inp)):
+            break
         print("enter you move: ")
-        inp =  input("")
+        inp = input("")
 
-        while True:
-            if (board.is_legal(board.parse_san(inp))):
-                break
-            print("enter you move: ")
-            inp =  input("")
-
-        board.push(board.parse_san(inp))
+    return board.parse_san(inp)
 
 
 def main():
-    board = chess.Board("rn3rk1/p5pp/2p5/3Ppb2/2q5/1Q6/PPPB2PP/R3K1NR b - - 0 1") 
+    board = chess.Board()
 
-    #while board.is_checkmate:
-     #   print (boardValue(board))
-      #  print(board)
-       # print("")
-        #humanPlayer(board)
-        #print (boardValue(board))
-        #print(board)
-        #print("")
-        
-        
-    
+    manager = Manager()
+    bot = MCTS(manager)
+
+    print(board)
+    while not board.is_game_over():
+        board.push(human_player(board))
+        print(board)
+        board.push(bot.best_move(board))
+        print(board)
+
+
 if __name__ == "__main__":
     main()
