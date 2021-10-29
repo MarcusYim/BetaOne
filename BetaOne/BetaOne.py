@@ -11,6 +11,11 @@ from multiprocessing import Pool, Manager
 from scipy.stats import pearsonr
 
 
+def init(l):
+    global lock
+    lock = l
+
+
 class MCTS(object):
     def __init__(self, manager, T=0.3, C=1.5):
         super().__init__()
@@ -25,32 +30,37 @@ class MCTS(object):
         copy_fen = fen[0:len(fen) - 4] + " 0 0"
         return chess.Board(copy_fen)
 
+    # total value per move
     def value(self, board, playouts=50, steps=5):
-        give = [playouts]
-        visit_dict = [playouts]
-        diff_dict = [playouts]
+        l = multiprocessing.Lock()
+        pool = multiprocessing.Pool(initializer=init, initargs=(l,))
 
-        for i in range(playouts):
-            visit_dict[i] = {}
-            diff_dict[i] = {}
-            give[i] = (self.copy_board(board), visit_dict[i], diff_dict[i])
+        itr = []
+        vis = {}
+        diff = {}
 
-        with Pool() as p:
-            scores = p.starmap(self.rollout_value, give)
+        for i in range(0, playouts):
+            itr.append((self.copy_board(board), diff, vis))
 
-        amalgam_visit = {}
-        amalgam_diff = {}
+        pool.starmap(self.rollout_value, itr)
+        pool.close()
+        pool.join()
 
-        for i in range(playouts):
-            temp = {key: visit_dict[i].get(key, 0) + amalgam_visit.get(key, 0)
-                    for key in set(visit_dict[i]) | set(amalgam_visit)}
+        for key in self.differential:
+            if key in diff.keys():
+                diff[key] = self.differential.get(key) + diff.get(key)
 
-            amalgam_visit = temp
+        self.differential.update(diff)
 
-            temp = {key: diff_dict[i].get(key, 0) + amalgam_diff.get(key, 0)
-                    for key in set(diff_dict[i]) | set(amalgam_diff)}
+        print(len(diff))
 
-            amalgam_diff = temp
+        for key in self.visits:
+            if key in vis.keys():
+                vis[key] = self.visits.get(key) + vis.get(key)
+
+        self.visits.update(vis)
+
+        print(len(vis))
 
         return self.differential[self.hash_board(board)] * 1.0 / self.visits[self.hash_board(board)]
 
@@ -61,27 +71,36 @@ class MCTS(object):
         V = self.differential.get(self.hash_board(board), 0) * 1.0 / Ni
         return V + self.C * (numpy.log(N) / Ni)
 
-    def record(self, board: chess.Board, score: float):
-        self.visits["total"] = self.visits.get("total", 0) + 1
-        self.visits[self.hash_board(board)] = self.visits.get(self.hash_board(board), 0) + 1
-        self.differential[self.hash_board(board)] = self.differential.get(self.hash_board(board), 0) + score
+    def record(self, board: chess.Board, score: float, diff, vis):
+        vis["total"] = vis.get("total", 0) + 1
+        vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+        diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + score
 
-    def rollout_value(self, board: chess.Board, expand=100):
+    # one playout
+    def rollout_value(self, board: chess.Board, diff, vis, expand=80):
         if expand == 0:
-            self.record(board, -0.5)
+            lock.acquire()
+            self.record(board, -0.5, diff, vis)
+            lock.release()
             return 0.5
 
         if board.is_game_over():
             result = board.result()
             sub_res = result[0: result.find("-")]
             if sub_res == "1":
-                self.record(board, -1)
+                lock.acquire()
+                self.record(board, -1, diff, vis)
+                lock.release()
                 return 1
             elif sub_res == "0":
-                self.record(board, 1)
+                lock.acquire()
+                self.record(board, 1, diff, vis)
+                lock.release()
                 return -1
             elif sub_res == "1/2":
-                self.record(board, -0.5)
+                lock.acquire()
+                self.record(board, -0.5, diff, vis)
+                lock.release()
                 return 0.5
 
         action_mapping = {}
@@ -93,13 +112,17 @@ class MCTS(object):
 
         chosen_action = sample(action_mapping, T=self.T)
         board.push(chosen_action)
-        score = -1 * self.rollout_value(board, expand=expand - 1)
+        score = -1 * self.rollout_value(board, diff, vis, expand=expand - 1)
         board.pop()
-        self.record(board, score)
+
+        lock.acquire()
+        self.record(board, score, diff, vis)
+        lock.release()
 
         return score
 
-    def best_move(self, board, playouts=50):
+    # best move
+    def best_move(self, board, playouts=75):
         startTime = time.time()
 
         action_mapping = {}
@@ -107,6 +130,7 @@ class MCTS(object):
         for move in board.legal_moves:
             board.push(move)
             action_mapping[move] = self.value(board, playouts=playouts)
+            print("done")
             board.pop()
 
         print("Process took: " + str(time.time() - startTime) + " seconds")
@@ -133,6 +157,7 @@ def human_player(board: chess.Board):
 
 
 def main():
+    # board = chess.Board("r1bqk2r/pppp1ppp/2nb1n2/1B2p3/4P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq")
     board = chess.Board()
 
     manager = Manager()
@@ -142,8 +167,10 @@ def main():
     while not board.is_game_over():
         board.push(human_player(board))
         print(board)
+        start = time.time()
         board.push(bot.best_move(board))
         print(board)
+        print("Time taken: " + str(time.time() - start))
 
 
 if __name__ == "__main__":
