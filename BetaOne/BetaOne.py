@@ -36,31 +36,21 @@ class MCTS(object):
         pool = multiprocessing.Pool(initializer=init, initargs=(l,))
 
         itr = []
-        vis = {}
-        diff = {}
+
+        manager = Manager()
+
+        man_diff = {}
+        man_vis = {}
 
         for i in range(0, playouts):
-            itr.append((self.copy_board(board), diff, vis))
+            itr.append((self.copy_board(board), man_diff, man_vis))
 
-        pool.starmap(self.rollout_value, itr)
+        pool.starmap(self.do_rollout_value, itr)
         pool.close()
         pool.join()
 
-        for key in self.differential:
-            if key in diff.keys():
-                diff[key] = self.differential.get(key) + diff.get(key)
-
-        self.differential.update(diff)
-
-        print(len(diff))
-
-        for key in self.visits:
-            if key in vis.keys():
-                vis[key] = self.visits.get(key) + vis.get(key)
-
-        self.visits.update(vis)
-
-        print(len(vis))
+        print(len(man_diff))
+        print(len(man_vis))
 
         return self.differential[self.hash_board(board)] * 1.0 / self.visits[self.hash_board(board)]
 
@@ -76,11 +66,34 @@ class MCTS(object):
         vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
         diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + score
 
+    def do_rollout_value(self, board, man_diff, man_vis, expand=80):
+        diff = {}
+        vis = {}
+
+        self.rollout_value(board, diff, vis, expand)
+
+        for key in man_diff:
+            if key in diff.keys():
+                diff[key] = man_diff.get(key) + diff.get(key)
+
+        man_diff.update(diff)
+
+        for key in man_vis:
+            if key in diff.keys():
+                diff[key] = man_vis.get(key) + diff.get(key)
+
+        man_vis.update(vis)
+
+        print(man_diff)
+        print(man_vis)
+
     # one playout
-    def rollout_value(self, board: chess.Board, diff, vis, expand=80):
+    def rollout_value(self, board: chess.Board, diff, vis, expand):
         if expand == 0:
             lock.acquire()
-            self.record(board, -0.5, diff, vis)
+            vis["total"] = vis.get("total", 0) + 1
+            vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+            diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 0.5
             lock.release()
             return 0.5
 
@@ -89,17 +102,23 @@ class MCTS(object):
             sub_res = result[0: result.find("-")]
             if sub_res == "1":
                 lock.acquire()
-                self.record(board, -1, diff, vis)
+                vis["total"] = vis.get("total", 0) + 1
+                vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+                diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 1
                 lock.release()
                 return 1
             elif sub_res == "0":
                 lock.acquire()
-                self.record(board, 1, diff, vis)
+                vis["total"] = vis.get("total", 0) + 1
+                vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+                diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + 1
                 lock.release()
                 return -1
             elif sub_res == "1/2":
                 lock.acquire()
-                self.record(board, -0.5, diff, vis)
+                vis["total"] = vis.get("total", 0) + 1
+                vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+                diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 0.5
                 lock.release()
                 return 0.5
 
@@ -116,7 +135,9 @@ class MCTS(object):
         board.pop()
 
         lock.acquire()
-        self.record(board, score, diff, vis)
+        vis["total"] = vis.get("total", 0) + 1
+        vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
+        diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + score
         lock.release()
 
         return score
