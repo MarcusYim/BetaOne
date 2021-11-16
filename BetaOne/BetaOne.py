@@ -85,7 +85,6 @@ class MCTS(object):
         man_vis.update(vis)
 
         print(man_diff)
-        print(man_vis)
 
     # one playout
     def rollout_value(self, board: chess.Board, diff, vis, expand):
