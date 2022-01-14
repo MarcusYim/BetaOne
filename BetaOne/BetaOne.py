@@ -4,6 +4,7 @@ import numpy
 import time
 import chess.svg
 import chess.pgn
+import chess.polyglot
 from utils import sample
 import sys, os, random, time, warnings
 import multiprocessing
@@ -17,11 +18,12 @@ def init(l):
 
 
 class MCTS(object):
-    def __init__(self, manager, T=0.3, C=1.5):
+    def __init__(self, manager, opening_book, T=0.3, C=1.5):
         super().__init__()
 
         self.visits = manager.dict()
         self.differential = manager.dict()
+        self.opening_book = opening_book
         self.T = T
         self.C = C
 
@@ -35,22 +37,11 @@ class MCTS(object):
         l = multiprocessing.Lock()
         pool = multiprocessing.Pool(initializer=init, initargs=(l,))
 
-        itr = []
+        itr = [self.copy_board(board) for i in range(0, playouts)]
 
-        manager = Manager()
-
-        man_diff = {}
-        man_vis = {}
-
-        for i in range(0, playouts):
-            itr.append((self.copy_board(board), man_diff, man_vis))
-
-        pool.starmap(self.do_rollout_value, itr)
+        pool.map(self.do_rollout_value, itr)
         pool.close()
         pool.join()
-
-        print(len(man_diff))
-        print(len(man_vis))
 
         return self.differential[self.hash_board(board)] * 1.0 / self.visits[self.hash_board(board)]
 
@@ -66,59 +57,58 @@ class MCTS(object):
         vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
         diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + score
 
-    def do_rollout_value(self, board, man_diff, man_vis, expand=80):
+    def do_rollout_value(self, board, expand=80):
         diff = {}
         vis = {}
 
         self.rollout_value(board, diff, vis, expand)
 
-        for key in man_diff:
-            if key in diff.keys():
-                diff[key] = man_diff.get(key) + diff.get(key)
+        try:
+            temp_diff = self.differential.copy()
 
-        man_diff.update(diff)
+            for key in temp_diff:
+                if key in diff.keys():
+                    diff[key] = temp_diff.get(key, 0) + diff.get(key, 0)
 
-        for key in man_vis:
-            if key in diff.keys():
-                diff[key] = man_vis.get(key) + diff.get(key)
+            temp_vis = self.visits.copy()
 
-        man_vis.update(vis)
+            for key in temp_vis:
+                if key in vis.keys():
+                    vis[key] = temp_vis.get(key, 0) + vis.get(key, 0)
 
-        print(man_diff)
+            lock.acquire()
+            self.differential.update(diff)
+            self.visits.update(vis)
+            lock.release()
+
+        except Exception as e:
+            print(repr(e))
 
     # one playout
     def rollout_value(self, board: chess.Board, diff, vis, expand):
         if expand == 0:
-            lock.acquire()
             vis["total"] = vis.get("total", 0) + 1
             vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
             diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 0.5
-            lock.release()
             return 0.5
 
         if board.is_game_over():
             result = board.result()
             sub_res = result[0: result.find("-")]
             if sub_res == "1":
-                lock.acquire()
                 vis["total"] = vis.get("total", 0) + 1
                 vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
                 diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 1
-                lock.release()
                 return 1
             elif sub_res == "0":
-                lock.acquire()
                 vis["total"] = vis.get("total", 0) + 1
                 vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
                 diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + 1
-                lock.release()
                 return -1
             elif sub_res == "1/2":
-                lock.acquire()
                 vis["total"] = vis.get("total", 0) + 1
                 vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
                 diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) - 0.5
-                lock.release()
                 return 0.5
 
         action_mapping = {}
@@ -133,17 +123,21 @@ class MCTS(object):
         score = -1 * self.rollout_value(board, diff, vis, expand=expand - 1)
         board.pop()
 
-        lock.acquire()
         vis["total"] = vis.get("total", 0) + 1
         vis[self.hash_board(board)] = vis.get(self.hash_board(board), 0) + 1
         diff[self.hash_board(board)] = diff.get(self.hash_board(board), 0) + score
-        lock.release()
 
         return score
 
     # best move
     def best_move(self, board, playouts=75):
         startTime = time.time()
+
+        opening_move = self.opening_book.get(board)
+
+        if opening_move is not None:
+            print("opening move")
+            return opening_move.move
 
         action_mapping = {}
 
@@ -177,20 +171,21 @@ def human_player(board: chess.Board):
 
 
 def main():
-    # board = chess.Board("r1bqk2r/pppp1ppp/2nb1n2/1B2p3/4P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq")
-    board = chess.Board()
+    board = chess.Board("r2qkb1r/pp2nppp/3p4/2pNN1B1/2BnP3/3P4/PPP2PPP/R2bK2R w KQkq - 1 0")
+    # board = chess.Board()
+    with chess.polyglot.open_reader("data/baron30.bin") as reader:
+        manager = Manager()
+        bot = MCTS(manager, reader)
 
-    manager = Manager()
-    bot = MCTS(manager)
+        print(board)
+        while not board.is_game_over():
+            start = time.time()
+            board.push(bot.best_move(board))
+            print(board)
+            print("Time taken: " + str(time.time() - start))
+            board.push(human_player(board))
+            print(board)
 
-    print(board)
-    while not board.is_game_over():
-        board.push(human_player(board))
-        print(board)
-        start = time.time()
-        board.push(bot.best_move(board))
-        print(board)
-        print("Time taken: " + str(time.time() - start))
 
 
 if __name__ == "__main__":
